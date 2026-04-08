@@ -1,29 +1,32 @@
 #!/usr/bin/env python3
 """
-inference.py - Baseline inference script for Support Ticket OpenEnv environment.
+inference.py - Inference script for Support Ticket OpenEnv environment.
 
-Usage:
-    export API_BASE_URL="https://api.openai.com/v1"
-    export MODEL_NAME="gpt-4o-mini"
-    export HF_TOKEN="hf_..."
-    python inference.py
+STDOUT FORMAT (required by validator):
+    [START] task=<task_name> env=<benchmark> model=<model_name>
+    [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
+    [END]   success=<true|false> steps=<n> score=<score> rewards=<r1,r2,...,rn>
 """
-
 from __future__ import annotations
 
 import json
 import os
+import re
 import sys
-import time
-import uuid
+from typing import Dict, Any, List, Optional
+
 import httpx
 from openai import OpenAI
 
-API_BASE_URL: str = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
-MODEL_NAME: str = os.environ.get("MODEL_NAME", "gpt-4o-mini")
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
+MODEL_NAME = os.getenv("MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
 HF_TOKEN: str = os.environ.get("HF_TOKEN") or os.environ.get("OPENAI_API_KEY", "")
 ENV_BASE_URL: str = os.environ.get("ENV_BASE_URL", "http://localhost:7860")
 NUM_EPISODES: int = int(os.environ.get("NUM_EPISODES", "5"))
+BENCHMARK: str = "support-ticket"
 
 if not HF_TOKEN:
     print("[ERROR] Set HF_TOKEN or OPENAI_API_KEY environment variable.", file=sys.stderr)
@@ -32,18 +35,56 @@ if not HF_TOKEN:
 client = OpenAI(api_key=HF_TOKEN, base_url=API_BASE_URL)
 
 
+# ---------------------------------------------------------------------------
+# Structured stdout logging helpers
+# ---------------------------------------------------------------------------
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
+
+
+def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+    done_val = str(done).lower()
+    error_val = error if error else "null"
+    print(
+        f"[STEP] step={step} action={action} reward={reward:.2f} done={done_val} error={error_val}",
+        flush=True,
+    )
+
+
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} score={score:.2f} rewards={rewards_str}",
+        flush=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Environment HTTP helpers
+# ---------------------------------------------------------------------------
 def env_reset(task_id: str, seed: int) -> dict:
-    resp = httpx.post(f"{ENV_BASE_URL}/reset", json={"task_id": task_id, "seed": seed}, timeout=30)
+    resp = httpx.post(
+        f"{ENV_BASE_URL}/reset",
+        json={"task_id": task_id, "seed": seed},
+        timeout=30,
+    )
     resp.raise_for_status()
     return resp.json()
 
 
 def env_step(action: dict) -> dict:
-    resp = httpx.post(f"{ENV_BASE_URL}/step", json={"action": action}, timeout=30)
+    resp = httpx.post(
+        f"{ENV_BASE_URL}/step",
+        json={"action": action},
+        timeout=30,
+    )
     resp.raise_for_status()
     return resp.json()
 
 
+# ---------------------------------------------------------------------------
+# Task-specific system prompts
+# ---------------------------------------------------------------------------
 TASK_SYSTEM_PROMPTS = {
     "task_1_classify": (
         "You are a customer support triage specialist. "
@@ -80,84 +121,109 @@ def build_user_prompt(obs: dict) -> str:
 
 
 def call_llm(task_id: str, user_prompt: str) -> dict:
-    response = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[
-            {"role": "system", "content": TASK_SYSTEM_PROMPTS[task_id]},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.0,
-        max_tokens=1024,
-    )
-    raw = response.choices[0].message.content.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    return json.loads(raw.strip())
+    try:
+        completion = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": TASK_SYSTEM_PROMPTS[task_id]},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.0,
+            stream=False,
+        )
+        text = (completion.choices[0].message.content or "").strip()
+        if not text:
+            return {}
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+        if text.startswith("```"):
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+        return json.loads(text.strip())
+    except Exception as exc:
+        print(f"[DEBUG] Model request failed: {exc}", file=sys.stderr, flush=True)
+        return {}
 
 
-def run_episode(task_id: str, seed: int, episode_num: int) -> dict:
-    run_id = str(uuid.uuid4())[:8]
-    reset_resp = env_reset(task_id=task_id, seed=seed)
-    obs = reset_resp
+# ---------------------------------------------------------------------------
+# Single episode runner
+# ---------------------------------------------------------------------------
+def run_episode(task_id: str, seed: int) -> float:
+    """Run one episode for *task_id* and emit [START]/[STEP]/[END] to stdout.
 
-    print(json.dumps({"type": "START", "run_id": run_id, "task_id": task_id,
-                      "episode": episode_num, "seed": seed,
-                      "ticket_id": obs["observation"]["ticket_id"],
-                      "model": MODEL_NAME, "timestamp": time.time()}), flush=True)
+    Returns the episode score in [0, 1].
+    """
+    rewards: List[float] = []
+    steps_taken = 0
+    score = 0.0
+    success = False
+    last_error: Optional[str] = None
+
+    log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
 
     try:
+        reset_resp = env_reset(task_id=task_id, seed=seed)
+        obs = reset_resp
+
         action_payload = call_llm(task_id, build_user_prompt(obs))
-    except Exception as e:
-        action_payload = {}
-        print(f"[WARN] LLM parse error: {e}", file=sys.stderr, flush=True)
+        if not action_payload:
+            last_error = "LLM returned empty or unparseable response"
 
-    action_payload["ticket_id"] = obs["observation"]["ticket_id"]
-    step_resp = env_step(action_payload)
-    reward = step_resp.get("reward", 0.0)
-    scores = step_resp["observation"].get("scores", {})
-    feedback = step_resp["observation"].get("feedback", "")
-    done = step_resp.get("done", False)
+        action_payload["ticket_id"] = obs["observation"]["ticket_id"]
 
-    print(json.dumps({"type": "STEP", "run_id": run_id, "task_id": task_id,
-                      "episode": episode_num, "step": 1, "action": action_payload,
-                      "reward": reward, "done": done, "scores": scores,
-                      "feedback": feedback, "timestamp": time.time()}), flush=True)
+        step_resp = env_step(action_payload)
+        reward = step_resp.get("reward", 0.0)
+        done = step_resp.get("done", False)
+        steps_taken = 1
+        rewards.append(reward)
 
-    print(json.dumps({"type": "END", "run_id": run_id, "task_id": task_id,
-                      "episode": episode_num, "total_reward": reward,
-                      "scores": scores, "done": done, "timestamp": time.time()}), flush=True)
+        action_summary = _summarize_action(task_id, action_payload)
+        log_step(step=1, action=action_summary, reward=reward, done=done, error=last_error)
 
-    return {"task_id": task_id, "episode": episode_num, "seed": seed, "reward": reward, "scores": scores}
+        score = reward
+        score = min(max(score, 0.0), 1.0)
+        success = score > 0.0
+
+    except Exception as exc:
+        last_error = str(exc)
+        print(f"[ERROR] Episode failed: {exc}", file=sys.stderr, flush=True)
+        if steps_taken == 0:
+            log_step(step=1, action="error", reward=0.0, done=True, error=last_error)
+            steps_taken = 1
+            rewards.append(0.0)
+
+    finally:
+        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+
+    return score
 
 
-def main():
+def _summarize_action(task_id: str, action: Dict[str, Any]) -> str:
+    """Produce a short single-line action string for the [STEP] log."""
+    if task_id == "task_1_classify":
+        return f"classify({action.get('category','?')},{action.get('priority','?')})"
+    if task_id == "task_2_respond":
+        draft = (action.get("response_draft") or "")[:40].replace("\n", " ")
+        return f"respond('{draft}...')"
+    draft = (action.get("response_draft") or "")[:30].replace("\n", " ")
+    return f"resolve({action.get('category','?')},{action.get('priority','?')},'{draft}...')"
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+def main() -> None:
     tasks = ["task_1_classify", "task_2_respond", "task_3_resolve"]
-    all_results = []
 
-    print(f"[INFO] Model={MODEL_NAME}, ENV={ENV_BASE_URL}, Episodes/task={NUM_EPISODES}", file=sys.stderr)
+    print(f"[INFO] Model={MODEL_NAME}, ENV={ENV_BASE_URL}, Episodes/task={NUM_EPISODES}", file=sys.stderr, flush=True)
 
     for task_id in tasks:
-        task_rewards = []
         for ep in range(NUM_EPISODES):
             seed = 42 + ep
             try:
-                result = run_episode(task_id=task_id, seed=seed, episode_num=ep + 1)
-                all_results.append(result)
-                task_rewards.append(result["reward"])
+                run_episode(task_id=task_id, seed=seed)
             except Exception as e:
-                print(f"[ERROR] Episode {ep+1} task {task_id} failed: {e}", file=sys.stderr)
-                task_rewards.append(0.0)
-
-        avg = sum(task_rewards) / len(task_rewards) if task_rewards else 0.0
-        print(f"[INFO] {task_id}: avg_reward={avg:.4f}", file=sys.stderr)
-
-    overall_avg = sum(r["reward"] for r in all_results) / len(all_results) if all_results else 0.0
-    print(json.dumps({"type": "SUMMARY", "model": MODEL_NAME,
-                      "total_episodes": len(all_results),
-                      "overall_avg_reward": round(overall_avg, 4),
-                      "timestamp": time.time()}), flush=True)
+                print(f"[ERROR] Unhandled error in {task_id} ep {ep+1}: {e}", file=sys.stderr, flush=True)
 
 
 if __name__ == "__main__":

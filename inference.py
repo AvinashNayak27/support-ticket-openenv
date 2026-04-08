@@ -24,7 +24,7 @@ from openai import OpenAI
 API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
 MODEL_NAME = os.getenv("MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
 HF_TOKEN: str = os.environ.get("HF_TOKEN") or os.environ.get("OPENAI_API_KEY", "")
-ENV_BASE_URL: str = os.environ.get("ENV_BASE_URL", "http://localhost:7860")
+ENV_BASE_URL: str = os.environ.get("ENV_BASE_URL", "https://avinashnayak-support-ticket-openenv.hf.space")
 NUM_EPISODES: int = int(os.environ.get("NUM_EPISODES", "5"))
 BENCHMARK: str = "support-ticket"
 

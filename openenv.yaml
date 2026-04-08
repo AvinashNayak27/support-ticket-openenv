@@ -1,0 +1,9 @@
+resources_servers:
+  openenv:
+    entrypoint: server/app.py
+    domain: customer-support
+    verified: false
+    description: "Customer Support Ticket Management environment via OpenEnv. An AI agent learns to classify, prioritize, draft responses, and resolve support tickets. Includes 3 tasks of increasing difficulty."
+    env_class: "support_ticket_env.server.environment.SupportTicketEnvironment"
+    action_class: "support_ticket_env.models.TicketAction"
+    is_mcp: false

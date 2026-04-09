@@ -172,7 +172,8 @@ def run_episode(task_id: str, seed: int) -> float:
         action_payload["ticket_id"] = obs["observation"]["ticket_id"]
 
         step_resp = env_step(action_payload)
-        reward = step_resp.get("reward", 0.0)
+        raw_reward = step_resp.get("reward", 0.0)
+        reward = max(0.01, min(0.99, raw_reward))
         done = step_resp.get("done", False)
         steps_taken = 1
         rewards.append(reward)
@@ -180,8 +181,7 @@ def run_episode(task_id: str, seed: int) -> float:
         action_summary = _summarize_action(task_id, action_payload)
         log_step(step=1, action=action_summary, reward=reward, done=done, error=last_error)
 
-        score = reward
-        score = min(max(score, 0.0), 1.0)
+        score = max(0.01, min(0.99, reward))
         success = score > 0.0
 
     except Exception as exc:
@@ -190,7 +190,7 @@ def run_episode(task_id: str, seed: int) -> float:
         if steps_taken == 0:
             log_step(step=1, action="error", reward=0.0, done=True, error=last_error)
             steps_taken = 1
-            rewards.append(0.0)
+            rewards.append(0.01)
 
     finally:
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)

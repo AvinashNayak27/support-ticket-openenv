@@ -82,6 +82,6 @@ def grade_task3(action: Dict[str, Any], ground_truth: Dict[str, Any], ticket: Di
     scores["resolution_correctness"] = round(res_score, 4)
 
     total = sum(scores.values())
-    total = max(0.001, min(0.999, total))
+    total = max(0.01, min(0.99, total))
     feedback = " | ".join(feedback_parts)
     return round(total, 4), scores, feedback

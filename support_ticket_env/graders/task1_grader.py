@@ -62,6 +62,6 @@ def grade_task1(action: Dict[str, Any], ground_truth: Dict[str, Any]) -> Tuple[f
         feedback_parts.append(f"Priority '{predicted_pri}' is invalid. Must be one of {sorted(VALID_PRIORITIES)}. (+0.0)")
 
     total = sum(scores.values())
-    total = max(0.001, min(0.999, total))
+    total = max(0.01, min(0.99, total))
     feedback = " | ".join(feedback_parts)
     return round(total, 4), scores, feedback

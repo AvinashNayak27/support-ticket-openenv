@@ -1,6 +1,6 @@
 """
 Task 3 Grader -- Full Resolution Pipeline (Hard)
-Scores 0.0-1.0 combining classification + response + resolution.
+Scores strictly between 0 and 1 combining classification + response + resolution.
 """
 from __future__ import annotations
 from typing import Dict, Any, Tuple
@@ -82,5 +82,6 @@ def grade_task3(action: Dict[str, Any], ground_truth: Dict[str, Any], ticket: Di
     scores["resolution_correctness"] = round(res_score, 4)
 
     total = sum(scores.values())
+    total = max(0.001, min(0.999, total))
     feedback = " | ".join(feedback_parts)
-    return round(min(total, 1.0), 4), scores, feedback
+    return round(total, 4), scores, feedback

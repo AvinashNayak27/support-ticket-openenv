@@ -1,6 +1,6 @@
 """
 Task 2 Grader -- Response Drafting (Medium)
-Scores 0.0-1.0 based on response quality.
+Scores strictly between 0 and 1 based on response quality.
 """
 from __future__ import annotations
 from typing import Dict, Any, Tuple
@@ -24,7 +24,7 @@ def grade_task2(action: Dict[str, Any], ground_truth: Dict[str, Any], ticket: Di
     response_lower = response.lower()
 
     if not response:
-        return 0.0, {"keyword_coverage": 0.0, "personalization": 0.0, "professionalism": 0.0, "length": 0.0}, "No response_draft provided."
+        return 0.001, {"keyword_coverage": 0.0, "personalization": 0.0, "professionalism": 0.0, "length": 0.0}, "No response_draft provided."
 
     keywords = ground_truth.get("response_keywords", [])
     if keywords:
@@ -70,5 +70,6 @@ def grade_task2(action: Dict[str, Any], ground_truth: Dict[str, Any], ticket: Di
         feedback_parts.append(f"Response too long ({word_count} words, max 500). (+0.10)")
 
     total = sum(scores.values())
+    total = max(0.001, min(0.999, total))
     feedback = " | ".join(feedback_parts)
     return round(total, 4), scores, feedback
